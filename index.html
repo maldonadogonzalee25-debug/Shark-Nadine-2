@@ -570,7 +570,7 @@
   /* ---------------- map ---------------- */
   // Bounds cover the hex layer's true extent (South Atlantic Bight EEZ, FL→NC).
   // Tightened to the actual grid once it loads so nothing is ever clipped.
-  const NC_BOUNDS = L.latLngBounds([[26.6, -81.3], [35.9, -71.6]]);
+  const NC_BOUNDS = L.latLngBounds([[32.5, -81.3], [37.5, -71.6]]);
   const map = L.map('map', {
     zoomControl:true, preferCanvas:true,
     maxBounds: NC_BOUNDS, maxBoundsViscosity: 1.0,
