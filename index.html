@@ -568,14 +568,13 @@
   const SHEETKEY = 'sde:sheeturl';
 
   /* ---------------- map ---------------- */
-  // Bounds cover the hex layer's true extent (South Atlantic Bight EEZ, FL→NC).
-  // Tightened to the actual grid once it loads so nothing is ever clipped.
-  const NC_BOUNDS = L.latLngBounds([[32.5, -81.3], [37.5, -71.6]]);
+  // Pan/zoom limited to North Carolina waters and EEZ: latitudes 31°N–37°N.
+  const NC_BOUNDS = L.latLngBounds([[31, -81.3], [37, -71.6]]);
   const map = L.map('map', {
     zoomControl:true, preferCanvas:true,
     maxBounds: NC_BOUNDS, maxBoundsViscosity: 1.0,
     minZoom: 5, maxZoom: 18
-  }).setView([31.1, -76.7], 6);
+  }).setView([34, -76.2], 6);
 
   // NOAA cached chart tiles. This cache's level 0 == standard web-mercator zoom 2,
   // so tiles are requested with zoomOffset -2 (URL level = mapZoom - 2, x/y at mapZoom).
@@ -669,7 +668,7 @@
     try{
       const b = gridLayer && gridLayer.getBounds();
       if(b && b.isValid()){
-        map.setMaxBounds(b.pad(0.25));
+        // Frame the grid on load, but keep the pan limit fixed at the NC 31–37°N bounds.
         if(fit && !userMoved && !entries.length){ map.fitBounds(b, {padding:[20,20]}); }
       }
     }catch(e){}
