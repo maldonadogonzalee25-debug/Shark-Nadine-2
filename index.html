@@ -144,7 +144,12 @@
   .draw-ctrls button:disabled{opacity:.4;cursor:default}
   .draw-ctrls .draw-finish{background:var(--coral);border-color:var(--coral);color:#fff}
   .draw-vertex{width:12px;height:12px;border-radius:50%;background:#fff;border:2.5px solid var(--coral);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+  .drop-point{width:16px;height:16px;border-radius:50%;background:var(--coral);border:2.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.4)}
   .draw-vertex.first{background:var(--coral)}
+  .mode-seg{display:flex;gap:0;margin:6px 3px 0;border:1px solid rgba(0,0,0,.14);border-radius:8px;overflow:hidden;width:max-content}
+  .mode-opt{font-family:"Archivo";font-size:11px;font-weight:700;letter-spacing:.02em;color:var(--navy);background:#fff;border:none;padding:6px 13px;cursor:pointer}
+  .mode-opt+.mode-opt{border-left:1px solid rgba(0,0,0,.14)}
+  .mode-opt.active{background:var(--teal);color:#fff}
   .grid-toggle{display:flex;align-items:center;gap:7px;margin-top:9px;font-family:"Archivo";font-size:11.5px;font-weight:600;color:var(--navy);cursor:pointer}
   .grid-toggle input{accent-color:var(--teal);width:14px;height:14px;cursor:pointer}
   .grid-status{align-items:center;gap:6px;margin-top:6px;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--teal)}
@@ -419,10 +424,14 @@
     <div class="map-tools">
       <div class="tool-group" id="gridGroup">
         <div class="gl">Report a depredation</div>
-        <div class="report-tip"><span class="hexmark"></span> Tap the map to trace an area</div>
+        <div class="report-tip"><span class="hexmark"></span> <span id="reportTip">Tap the map to trace an area</span></div>
+        <div class="mode-seg" id="modeSeg">
+          <button type="button" class="mode-opt active" id="modeArea" data-mode="area">▱ Area</button>
+          <button type="button" class="mode-opt" id="modePoint" data-mode="point">• Point</button>
+        </div>
         <div class="grid-hint" id="gridHint">Drop each corner (3+ points), press <b>Add area</b>, then trace more areas or press <b>Done</b>.</div>
         <div class="draw-ctrls" id="drawCtrls">
-          <span class="draw-count" id="drawCount">0 areas</span>
+          <span class="draw-count" id="drawCount">nothing yet</span>
           <button type="button" id="drawUndo" disabled>Undo</button>
           <button type="button" id="drawClear" disabled>Clear</button>
           <button type="button" id="drawFinish" disabled>Add area ✓</button>
@@ -561,7 +570,7 @@
   /* ---------------- map ---------------- */
   // Bounds cover the hex layer's true extent (South Atlantic Bight EEZ, FL→NC).
   // Tightened to the actual grid once it loads so nothing is ever clipped.
-  const NC_BOUNDS = L.latLngBounds([[26.6, -81.3], [36.6, -71.6]]);
+  const NC_BOUNDS = L.latLngBounds([[26.6, -81.3], [35.9, -71.6]]);
   const map = L.map('map', {
     zoomControl:true, preferCanvas:true,
     maxBounds: NC_BOUNDS, maxBoundsViscosity: 1.0,
@@ -846,23 +855,51 @@
     }catch(e){}
     return null;
   }
-  /* ---------------- draw the depredation area(s) (tap corners → one or more polygons) ---------------- */
-  // People trace the general area by tapping corner points. A report can hold several
-  // separate areas. The raw polygon(s) are stored on the event; the hex cells inside them
-  // are worked out later on the data side.
+  /* ---------------- mark the depredation location(s): points and/or areas ---------------- */
+  // People can drop single points and/or trace polygon areas — any mix, several of each.
+  // Everything is stored as raw geometry on the event; the hex cells inside each area are
+  // worked out later, on the data side.
+  let drawMode = 'area';              // 'area' (tap corners → polygon) or 'point' (tap → single point)
   const drawPts = [];                 // L.latLng vertices of the area being traced now
   let drawShape = null;               // live preview of the in-progress area
   const drawMarkers = [];             // vertex handles for the in-progress area
   const committedAreas = [];          // finished areas: { latlngs:[L.latLng...], ring:[[lng,lat]...], layer }
+  const droppedPoints = [];           // single points: { latlng:L.latLng, layer }
+  const placed = [];                  // order things were added, for Undo: {type:'area'|'point', ref}
 
   const drawCtrls = document.getElementById('drawCtrls');
   const drawCountEl = document.getElementById('drawCount');
   const btnUndo = document.getElementById('drawUndo');
   const btnClear = document.getElementById('drawClear');
-  const btnFinish = document.getElementById('drawFinish');   // "Add area"
+  const btnFinish = document.getElementById('drawFinish');   // "Add area" (area mode only)
   const btnDone = document.getElementById('drawDone');        // "Done → form"
+  const reportTipEl = document.getElementById('reportTip');
+  const gridHintEl = document.getElementById('gridHint');
+  const modeAreaBtn = document.getElementById('modeArea');
+  const modePointBtn = document.getElementById('modePoint');
+
+  const TIP = {
+    area:  'Tap the map to trace an area',
+    point: 'Tap the map to drop a point'
+  };
+  const HINT = {
+    area:  'Drop each corner (3+ points), press <b>Add area</b>, then trace more or switch to <b>Point</b>. Press <b>Done</b> when finished.',
+    point: 'Tap to drop a point. Add as many as you need, or switch to <b>Area</b>. Press <b>Done</b> when finished.'
+  };
 
   function vtxIcon(first){ return L.divIcon({ className:'', html:'<div class="draw-vertex'+(first?' first':'')+'"></div>', iconSize:[12,12], iconAnchor:[6,6] }); }
+  function ptIcon(){ return L.divIcon({ className:'', html:'<div class="drop-point"></div>', iconSize:[16,16], iconAnchor:[8,8] }); }
+
+  function setMode(mode){
+    if(drawPts.length){ toast('Finish or clear the current area first'); return; }
+    drawMode = mode;
+    modeAreaBtn.classList.toggle('active', mode==='area');
+    modePointBtn.classList.toggle('active', mode==='point');
+    btnFinish.style.display = (mode==='area') ? '' : 'none';
+    reportTipEl.textContent = TIP[mode];
+    gridHintEl.innerHTML = HINT[mode];
+    redrawDraw();
+  }
 
   function redrawDraw(){
     if(drawShape){ map.removeLayer(drawShape); drawShape=null; }
@@ -872,16 +909,18 @@
         : L.polyline(drawPts, { color:'#E4572E', weight:2.5, dashArray:'6 5' });
       drawShape.addTo(map);
     }
-    const n = drawPts.length, a = committedAreas.length;
+    const n = drawPts.length, a = committedAreas.length, p = droppedPoints.length;
     const parts = [];
-    parts.push(a + (a===1?' area':' areas'));
-    if(n>0) parts.push(n + (n===1?' pt':' pts'));
-    drawCountEl.textContent = parts.join('  ·  ');
-    drawCtrls.classList.toggle('on', n>0 || a>0);
-    btnUndo.disabled  = (n===0 && a===0);
-    btnClear.disabled = (n===0 && a===0);
-    btnFinish.disabled = n<3;                 // need a valid ring to add
-    btnDone.disabled   = (a===0 && n<3);      // need at least one area (trailing ring auto-added)
+    if(a) parts.push(a + (a===1?' area':' areas'));
+    if(p) parts.push(p + (p===1?' point':' points'));
+    if(n) parts.push(n + (n===1?' pt in progress':' pts in progress'));
+    drawCountEl.textContent = parts.length ? parts.join('  ·  ') : 'nothing yet';
+    drawCtrls.classList.add('on');   // controls stay visible so the mode toggle is always reachable
+    const anything = (n>0 || a>0 || p>0);
+    btnUndo.disabled  = !anything;
+    btnClear.disabled = !anything;
+    btnFinish.disabled = n<3;                          // need a valid ring to add
+    btnDone.disabled   = !(a>0 || p>0 || n>=3);        // at least one point or area (trailing ring auto-added)
   }
 
   function addDrawPoint(latlng){
@@ -890,26 +929,41 @@
     drawMarkers.push(m);
     redrawDraw();
   }
+  function dropPoint(latlng){
+    const layer = L.marker(latlng, { icon:ptIcon(), keyboard:false, interactive:false }).addTo(map);
+    const ref = { latlng, layer };
+    droppedPoints.push(ref);
+    placed.push({ type:'point', ref });
+    redrawDraw();
+  }
   function clearCurrent(){
     drawPts.length = 0;
     drawMarkers.forEach(m=>map.removeLayer(m)); drawMarkers.length = 0;
     if(drawShape){ map.removeLayer(drawShape); drawShape=null; }
   }
   function undoDrawPoint(){
-    if(drawPts.length){                         // step back one point in the current area
+    if(drawPts.length){                         // step back one vertex of the current area
       drawPts.pop();
       const m = drawMarkers.pop(); if(m) map.removeLayer(m);
       redrawDraw();
-    } else if(committedAreas.length){            // nothing in progress → remove the last saved area
-      const area = committedAreas.pop();
-      if(area.layer) map.removeLayer(area.layer);
-      redrawDraw();
+      return;
     }
+    const last = placed.pop();                  // otherwise remove the most recent point or area
+    if(!last) return;
+    if(last.type==='point'){
+      if(last.ref.layer) map.removeLayer(last.ref.layer);
+      const i = droppedPoints.indexOf(last.ref); if(i>-1) droppedPoints.splice(i,1);
+    } else {
+      if(last.ref.layer) map.removeLayer(last.ref.layer);
+      const i = committedAreas.indexOf(last.ref); if(i>-1) committedAreas.splice(i,1);
+    }
+    redrawDraw();
   }
   function clearDraw(){                           // wipe everything for this report
     clearCurrent();
-    committedAreas.forEach(area=>{ if(area.layer) map.removeLayer(area.layer); });
-    committedAreas.length = 0;
+    committedAreas.forEach(a=>{ if(a.layer) map.removeLayer(a.layer); });
+    droppedPoints.forEach(p=>{ if(p.layer) map.removeLayer(p.layer); });
+    committedAreas.length = 0; droppedPoints.length = 0; placed.length = 0;
     redrawDraw();
   }
   function centroidOf(pts){
@@ -918,34 +972,69 @@
   }
   // Local calendar date (YYYY-MM-DD) for auto-captured report dates.
   function todayLocal(){ const n=new Date(); n.setMinutes(n.getMinutes()-n.getTimezoneOffset()); return n.toISOString().slice(0,10); }
-  // Commit the in-progress area to the report's set and keep drawing.
+  // Count how many areas and points a stored geometry holds (handles GeometryCollection).
+  function countGeom(g){
+    let areas=0, points=0;
+    const add=(t,c)=>{
+      if(t==='Polygon') areas+=1;
+      else if(t==='MultiPolygon') areas+=(c?c.length:1);
+      else if(t==='Point') points+=1;
+      else if(t==='MultiPoint') points+=(c?c.length:1);
+    };
+    if(g){ if(g.type==='GeometryCollection'){ (g.geometries||[]).forEach(x=>add(x.type,x.coordinates)); } else add(g.type, g.coordinates); }
+    return { areas, points };
+  }
+  function geomWords(g){
+    const c=countGeom(g), parts=[];
+    if(c.areas) parts.push(c.areas+(c.areas===1?' area':' areas'));
+    if(c.points) parts.push(c.points+(c.points===1?' point':' points'));
+    return parts.join(' + ') || 'location';
+  }
+  // Commit the in-progress area to the report's set and keep working.
   function addArea(){
     if(drawPts.length<3){ toast('Add at least 3 points to close the area'); return false; }
     const ring = drawPts.map(p=>[p.lng, p.lat]);
     ring.push([drawPts[0].lng, drawPts[0].lat]); // close the ring
     const layer = L.polygon(drawPts, { color:'#118AB2', weight:2, fillColor:'#118AB2', fillOpacity:.14 }).addTo(map);
-    committedAreas.push({ latlngs:[...drawPts], ring, layer });
+    const ref = { latlngs:[...drawPts], ring, layer };
+    committedAreas.push(ref);
+    placed.push({ type:'area', ref });
     clearCurrent();
     redrawDraw();
     return true;
   }
-  // Finish the report: auto-add any trailing ring, then build the geometry and open the form.
+  // Finish the report: auto-add any trailing ring, build the geometry, open the form.
   function finishDraw(){
-    if(drawPts.length>=3){ addArea(); }
+    if(drawMode==='area' && drawPts.length>=3){ addArea(); }
     else if(drawPts.length>0){ toast('That area needs at least 3 points — finish or clear it first'); return; }
-    if(!committedAreas.length){ toast('Trace at least one area'); return; }
+    if(!committedAreas.length && !droppedPoints.length){ toast('Drop a point or trace an area first'); return; }
 
-    const rings = committedAreas.map(a=>a.ring);
-    const geometry = (rings.length===1)
-      ? { type:'Polygon', coordinates:[rings[0]] }
-      : { type:'MultiPolygon', coordinates: rings.map(r=>[r]) };
-    const allPts = committedAreas.reduce((acc,a)=>acc.concat(a.latlngs), []);
+    // Build a geometry: points → Point/MultiPoint, areas → Polygon/MultiPolygon,
+    // both → GeometryCollection.
+    const geoms = [];
+    if(droppedPoints.length){
+      const pc = droppedPoints.map(p=>[p.latlng.lng, p.latlng.lat]);
+      geoms.push(pc.length===1 ? { type:'Point', coordinates:pc[0] } : { type:'MultiPoint', coordinates:pc });
+    }
+    if(committedAreas.length){
+      const rings = committedAreas.map(a=>a.ring);
+      geoms.push(rings.length===1
+        ? { type:'Polygon', coordinates:[rings[0]] }
+        : { type:'MultiPolygon', coordinates: rings.map(r=>[r]) });
+    }
+    const geometry = geoms.length===1 ? geoms[0] : { type:'GeometryCollection', geometries: geoms };
+
+    const geomType = (committedAreas.length && droppedPoints.length) ? 'mixed'
+                   : (committedAreas.length ? 'polygon' : 'point');
+    const allPts = committedAreas.reduce((acc,a)=>acc.concat(a.latlngs), [])
+                     .concat(droppedPoints.map(p=>p.latlng));
     pending = {
       geometry,
-      geomType:'polygon',
+      geomType,
       center: centroidOf(allPts),
       areaCount: committedAreas.length,
-      hexId: undefined   // hex cells inside the polygon(s) are assigned later, on the data side
+      pointCount: droppedPoints.length,
+      hexId: undefined   // hex cells inside the area(s) are assigned later, on the data side
     };
     clearDraw();
     openForm();
@@ -953,13 +1042,17 @@
 
   function onMapClick(e){
     if(document.getElementById('modalBg').classList.contains('open')) return; // ignore taps behind a modal
-    addDrawPoint(e.latlng);
+    if(drawMode==='point') dropPoint(e.latlng);
+    else addDrawPoint(e.latlng);
   }
   map.on('click', onMapClick);
   btnUndo.onclick = undoDrawPoint;
   btnClear.onclick = clearDraw;
   btnFinish.onclick = addArea;
   btnDone.onclick = finishDraw;
+  modeAreaBtn.onclick = ()=>setMode('area');
+  modePointBtn.onclick = ()=>setMode('point');
+  setMode('area');
 
   /* ---------------- coordinate formatting ---------------- */
   function toDDM(lat, lon){
@@ -1017,8 +1110,9 @@
       const hex = (e.hexId) ? ('<span class="tag hex">⬡ '+esc(e.hexId)+'</span>') : '';
       const pcode = e.participantId ? ('<span class="tag pcode">'+esc(e.participantId)+'</span>') : '';
       const sync = SUBMIT_ENDPOINT ? (e.synced ? '<span class="tag synced">✓ sent</span>' : '<span class="tag unsynced">↑ pending</span>') : '';
-      const dotClass = e.geomType==='hexagon' ? 'hex-dot' : (e.geomType==='polygon' ? 'poly-dot' : '');
-      const geomLabel = e.geomType==='hexagon' ? '  · cell' : (e.geomType==='polygon' ? '  · area' : '');
+      const _gc = countGeom(e.geometry);
+      const dotClass = e.geomType==='hexagon' ? 'hex-dot' : (_gc.areas>0 ? 'poly-dot' : '');
+      const geomLabel = e.geomType==='hexagon' ? '  · cell' : '  · '+geomWords(e.geometry);
       div.innerHTML =
         '<div class="row1"><span class="dot '+dotClass+'"></span>'+
         '<span class="date">'+fmtDate(e.datetime)+'</span></div>'+
@@ -1063,18 +1157,17 @@
 
     const isOtherShark = src.shark==='__other__';
     const isOtherTarget = src.target==='__other__';
-    const isArea = geomType==='polygon' || geomType==='hexagon';
     const geomForm = existing ? existing.geometry : (pending ? pending.geometry : null);
-    const nAreas = (geomForm && geomForm.type==='MultiPolygon') ? geomForm.coordinates.length : 1;
-    const areaWord = nAreas===1 ? 'area' : nAreas+' areas';
+    const gcounts = countGeom(geomForm);
+    const isArea = geomType==='hexagon' || gcounts.areas>0;
+    const words = geomWords(geomForm);
     const geomIcon = (geomType==='hexagon')
       ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M7 4h10l4 8-4 8H7l-4-8z" transform="rotate(90 12 12)"/></svg>'
-      : (geomType==='polygon')
+      : (gcounts.areas>0)
         ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M5 8l7-4 7 4v8l-7 4-7-4z"/></svg>'
         : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M12 21s7-6.2 7-11a7 7 0 10-14 0c0 4.8 7 11 7 11z"/><circle cx="12" cy="10" r="2" fill="#fff" stroke="none"/></svg>';
     const geomSub = hexId ? ('Hex cell '+esc(hexId))
-                  : (geomType==='polygon') ? (nAreas>1 ? (nAreas+' areas · centre ') : ('Area · centre '))+center[0].toFixed(4)+', '+center[1].toFixed(4)
-                  : ('Point · '+center[0].toFixed(4)+', '+center[1].toFixed(4));
+                  : (words.charAt(0).toUpperCase()+words.slice(1))+' · centre '+center[0].toFixed(4)+', '+center[1].toFixed(4);
 
     const modal=document.getElementById('modal');
     modal.innerHTML =
@@ -1087,7 +1180,7 @@
     '<div class="modal-body">'+
       '<div class="coord-readout-form"><div class="rl">Location'+(hexId?' — hex cell '+esc(hexId):'')+'</div>'+
         '<div class="rv">'+toDDM(center[0],center[1])+'</div>'+
-        '<div class="rv2">'+center[0].toFixed(5)+', '+center[1].toFixed(5)+(geomType==='polygon'?('  ·  '+(nAreas>1?nAreas+' polygon areas':'polygon area')):(hexId?'  ·  in cell '+esc(hexId):''))+'</div></div>'+
+        '<div class="rv2">'+center[0].toFixed(5)+', '+center[1].toFixed(5)+(hexId?('  ·  in cell '+esc(hexId)):('  ·  '+words))+'</div></div>'+
 
       '<div class="field"><label>Participant / survey code <span class="req">*</span></label>'+
         '<div class="pcode-row">'+
@@ -1240,6 +1333,8 @@
       geometry: src ? src.geometry : pending.geometry,
       geomType: src ? src.geomType : pending.geomType,
       center: src ? src.center : pending.center,
+      areaCount: src ? src.areaCount : (pending ? pending.areaCount : undefined),
+      pointCount: src ? src.pointCount : (pending ? pending.pointCount : undefined),
       hexId: src ? src.hexId : (pending ? pending.hexId : undefined),
       shark: keep('fShark', src&&src.shark), sharkOther: keepT('fSharkOther', src&&src.sharkOther),
       target: keep('fTarget', src&&src.target), targetOther: keepT('fTargetOther', src&&src.targetOther),
@@ -1301,10 +1396,10 @@
     const modal=document.getElementById('modal');
     modal.innerHTML=
     '<div class="modal-head">'+
-      '<div class="mh-ic '+(e.geomType==='point'?'':'poly')+'">'+
+      '<div class="mh-ic '+(countGeom(e.geometry).areas>0||e.geomType==='hexagon'?'poly':'')+'">'+
         (e.geomType==='hexagon'
           ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M7 4h10l4 8-4 8H7l-4-8z" transform="rotate(90 12 12)"/></svg>'
-          : e.geomType==='polygon'
+          : countGeom(e.geometry).areas>0
             ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M5 8l7-4 7 4v8l-7 4-7-4z"/></svg>'
             : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M12 21s7-6.2 7-11a7 7 0 10-14 0c0 4.8 7 11 7 11z"/><circle cx="12" cy="10" r="2" fill="#fff" stroke="none"/></svg>')+
       '</div>'+
@@ -1312,7 +1407,7 @@
       '<button class="x" id="dClose" aria-label="Close">×</button>'+
     '</div>'+
     '<div class="modal-body">'+
-      '<div class="coord-readout-form"><div class="rl">Location — '+(e.geomType==='hexagon'?'hex cell centroid':e.geomType==='polygon'?'area centre':'point')+'</div>'+
+      '<div class="coord-readout-form"><div class="rl">Location — '+(e.geomType==='hexagon'?'hex cell centroid':geomWords(e.geometry)+' · centre')+'</div>'+
         '<div class="rv">'+toDDM(e.center[0],e.center[1])+'</div>'+
         '<div class="rv2">'+e.center[0].toFixed(5)+', '+e.center[1].toFixed(5)+'</div></div>'+
       '<div class="detail-species">'+speciesLine(e,' <span class="arrow">✕</span> ')+'</div>'+
@@ -1715,12 +1810,13 @@
       '<button class="x" id="wClose" aria-label="Close">×</button>'+
     '</div>'+
     '<div class="modal-body">'+
-      '<p class="wlead">Report where sharks <b>took or damaged your catch</b>. You trace the general <b>area</b> on the nautical chart and tag it with your survey code, so researchers can match it to the paper survey and map where depredation happens most.</p>'+
+      '<p class="wlead">Report where sharks <b>took or damaged your catch</b>. Mark the spot on the nautical chart — as a <b>point</b>, or by tracing the general <b>area</b> — and tag it with your survey code, so researchers can match it to the paper survey and map where depredation happens most.</p>'+
       '<div class="wsteps">'+
         '<div class="wstep"><div class="wn">1</div><div class="wt"><b>Set your code</b> below — type the one we gave you, or <b>Generate</b> one and write it on the paper survey.</div></div>'+
-        '<div class="wstep"><div class="wn">2</div><div class="wt"><b>Trace the area.</b> Tap the chart to drop each corner of the general area (3+ points), then press <b>Add area</b>. Trace as many separate areas as you need, then press <b>Done</b>.</div></div>'+
-        '<div class="wstep"><div class="wn">3</div><div class="wt"><b>Confirm the details.</b> Check the participant code, add any notes, and log the event. The date is recorded automatically.</div></div>'+
-        '<div class="wstep"><div class="wn">4</div><div class="wt">'+
+        '<div class="wstep"><div class="wn">2</div><div class="wt"><b>Pick how to mark it.</b> Use the <b>Point</b> / <b>Area</b> switch on the map:<br>• <b>Point</b> — each tap drops a single spot. Drop as many as you like.<br>• <b>Area</b> — tap 3+ corners to outline a zone, then press <b>Add area</b>. Repeat for more zones.</div></div>'+
+        '<div class="wstep"><div class="wn">3</div><div class="wt"><b>Mix freely, then finish.</b> One report can hold several points and areas together. <b>Undo</b> removes the last thing you placed; <b>Clear</b> starts over. Press <b>Done</b> when the map looks right.</div></div>'+
+        '<div class="wstep"><div class="wn">4</div><div class="wt"><b>Confirm and log.</b> Check the participant code, add any notes, and log the event. The date is recorded automatically.</div></div>'+
+        '<div class="wstep"><div class="wn">5</div><div class="wt">'+
           (SUBMIT_ENDPOINT
             ? '<b>That’s it — it sends itself.</b> Reports upload to the research team automatically when you’re online. No signal? They wait and send later.'
             : '<b>Export when done.</b> Use <b>Export</b> (top right) to download your reports as CSV or GeoJSON.')+
